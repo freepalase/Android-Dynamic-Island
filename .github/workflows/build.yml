@@ -106,6 +106,16 @@ jobs:
                           android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                           android:value="overlay" />
                   </service>
+
+                  <service
+                      android:name=".NotifListener"
+                      android:exported="true"
+                      android:label="Dynamic Island"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
               </application>
           </manifest>
           EOF_FILE
@@ -115,39 +125,130 @@ jobs:
           import android.Manifest
           import android.app.Activity
           import android.content.Intent
+          import android.content.SharedPreferences
           import android.content.pm.PackageManager
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
           import android.provider.Settings
           import android.view.Gravity
+          import android.view.ViewGroup
           import android.widget.Button
           import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.SeekBar
           import android.widget.TextView
 
           class MainActivity : Activity() {
 
+              private class Slider(
+                  val key: String,
+                  val label: String,
+                  val min: Int,
+                  val max: Int,
+                  val def: Int
+              )
+
+              private val sliders = listOf(
+                  Slider("y", "Position verticale", 0, 120, IslandService.DEF_Y),
+                  Slider("x", "Position horizontale", -200, 200, IslandService.DEF_X),
+                  Slider("w", "Largeur au repos", 60, 260, IslandService.DEF_W),
+                  Slider("h", "Hauteur au repos", 20, 70, IslandService.DEF_H)
+              )
+              private val bars = HashMap<String, SeekBar>()
+              private val labels = HashMap<String, TextView>()
+              private lateinit var prefs: SharedPreferences
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+              private fun button(label: String, onClick: () -> Unit) = Button(this).apply {
+                  this.text = label
+                  setOnClickListener { onClick() }
+              }
+
+              private fun text(label: String, size: Float) = TextView(this).apply {
+                  this.text = label
+                  textSize = size
+                  setPadding(0, dp(12), 0, dp(4))
+              }
+
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  val pad = (24 * resources.displayMetrics.density).toInt()
-                  setContentView(LinearLayout(this).apply {
+                  prefs = getSharedPreferences(IslandService.PREFS, MODE_PRIVATE)
+
+                  val col = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      gravity = Gravity.CENTER
-                      setPadding(pad, pad, pad, pad)
-                      addView(TextView(context).apply {
-                          text = "Dynamic Island"
-                          textSize = 24f
-                          gravity = Gravity.CENTER
-                      })
-                      addView(Button(context).apply {
-                          text = "Activer"
-                          setOnClickListener { start() }
-                      })
-                      addView(Button(context).apply {
-                          text = "Désactiver"
-                          setOnClickListener { stopService(Intent(context, IslandService::class.java)) }
-                      })
+                      setPadding(dp(20), dp(24), dp(20), dp(24))
+                  }
+
+                  col.addView(text("Dynamic Island", 26f).apply { gravity = Gravity.CENTER })
+                  col.addView(button("Activer") { start() })
+                  col.addView(button("Désactiver") {
+                      stopService(Intent(this, IslandService::class.java))
                   })
+
+                  col.addView(text("Position et taille (aperçu en direct)", 18f))
+                  for (s in sliders) {
+                      val label = TextView(this)
+                      val bar = SeekBar(this).apply {
+                          max = s.max - s.min
+                          setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                              override fun onProgressChanged(b: SeekBar, p: Int, fromUser: Boolean) {
+                                  val v = s.min + p
+                                  label.text = "${s.label} : $v dp"
+                                  if (fromUser) prefs.edit().putInt(s.key, v).apply()
+                              }
+                              override fun onStartTrackingTouch(b: SeekBar) {}
+                              override fun onStopTrackingTouch(b: SeekBar) {}
+                          })
+                      }
+                      labels[s.key] = label
+                      bars[s.key] = bar
+                      col.addView(label)
+                      col.addView(
+                          bar,
+                          LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          )
+                      )
+                  }
+                  col.addView(button("Réinitialiser la position") {
+                      val e = prefs.edit()
+                      for (s in sliders) e.putInt(s.key, s.def)
+                      e.apply()
+                      refreshBars()
+                  })
+
+                  col.addView(text("Musique et minuteur", 18f))
+                  col.addView(
+                      TextView(this).apply {
+                          text = "Pour le lecteur musical et la détection du minuteur de l'appli Horloge, " +
+                              "autorise l'accès aux notifications de « Dynamic Island »."
+                      }
+                  )
+                  col.addView(button("Autoriser l'accès aux notifications") {
+                      startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                  })
+                  col.addView(
+                      TextView(this).apply {
+                          text = "Si l'option est grisée (Android 13+) : Réglages › Applications › Dynamic Island " +
+                              "› menu ⋮ › « Autoriser les paramètres restreints », puis recommence."
+                          textSize = 12f
+                          setPadding(0, dp(8), 0, 0)
+                      }
+                  )
+
+                  setContentView(ScrollView(this).apply { addView(col) })
+                  refreshBars()
+              }
+
+              private fun refreshBars() {
+                  for (s in sliders) {
+                      val v = prefs.getInt(s.key, s.def)
+                      bars[s.key]?.progress = v - s.min
+                      labels[s.key]?.text = "${s.label} : $v dp"
+                  }
               }
 
               private fun start() {
@@ -187,19 +288,27 @@ jobs:
           import android.app.Notification
           import android.app.NotificationChannel
           import android.app.NotificationManager
+          import android.app.PendingIntent
           import android.app.Service
           import android.bluetooth.BluetoothDevice
           import android.content.BroadcastReceiver
+          import android.content.ComponentName
           import android.content.Context
           import android.content.Intent
           import android.content.IntentFilter
+          import android.content.SharedPreferences
           import android.content.pm.ServiceInfo
           import android.content.res.ColorStateList
           import android.graphics.Color
+          import android.graphics.Outline
           import android.graphics.PixelFormat
           import android.graphics.drawable.GradientDrawable
           import android.hardware.camera2.CameraCharacteristics
           import android.hardware.camera2.CameraManager
+          import android.media.MediaMetadata
+          import android.media.session.MediaController
+          import android.media.session.MediaSessionManager
+          import android.media.session.PlaybackState
           import android.net.ConnectivityManager
           import android.net.Network
           import android.net.NetworkCapabilities
@@ -210,6 +319,7 @@ jobs:
           import android.os.Handler
           import android.os.IBinder
           import android.os.Looper
+          import android.service.notification.StatusBarNotification
           import android.text.TextUtils
           import android.view.Gravity
           import android.view.GestureDetector
@@ -217,10 +327,12 @@ jobs:
           import android.view.MotionEvent
           import android.view.View
           import android.view.ViewGroup
+          import android.view.ViewOutlineProvider
           import android.view.WindowManager
           import android.view.animation.DecelerateInterpolator
           import android.view.animation.OvershootInterpolator
           import android.widget.FrameLayout
+          import android.widget.ImageView
           import android.widget.LinearLayout
           import android.widget.SeekBar
           import android.widget.TextView
@@ -228,17 +340,25 @@ jobs:
           class IslandService : Service() {
 
               companion object {
-                  // Taille de la pilule au repos (dp) : à ajuster pour coller à ta caméra frontale
-                  const val IDLE_W = 126
-                  const val IDLE_H = 36
-                  const val TOP_MARGIN = 10 // distance depuis le haut de l'écran (dp)
+                  @Volatile
+                  var instance: IslandService? = null
+
+                  const val PREFS = "island"
+                  const val DEF_W = 126
+                  const val DEF_H = 36
+                  const val DEF_Y = 10
+                  const val DEF_X = 0
+
+                  private const val CLOCK_SIDE = 66 // largeur ajoutée de chaque côté quand un minuteur tourne (dp)
                   private val YELLOW = Color.rgb(255, 214, 10)
+                  private val TIME_RE = Regex("""\d{1,2}(:\d{2}){1,2}""")
               }
 
-              private enum class Mode { IDLE, EVENT, TORCH }
+              private enum class Mode { IDLE, EVENT, TORCH, MUSIC }
 
               private val ui = Handler(Looper.getMainLooper())
               private lateinit var wm: WindowManager
+              private lateinit var wlp: WindowManager.LayoutParams
               private lateinit var root: FrameLayout
               private lateinit var island: FrameLayout
               private lateinit var bg: GradientDrawable
@@ -246,10 +366,28 @@ jobs:
               private lateinit var torchPanel: LinearLayout
               private lateinit var torchBtn: TextView
               private lateinit var seek: SeekBar
+              private lateinit var musicPanel: LinearLayout
+              private lateinit var musicArt: ImageView
+              private lateinit var musicTitle: TextView
+              private lateinit var musicArtist: TextView
+              private lateinit var btnPlay: TextView
+              private lateinit var clockIcon: TextView
+              private lateinit var clockTime: TextView
 
               private var mode = Mode.IDLE
               private var anim: ValueAnimator? = null
               private val collapseRunnable = Runnable { collapse() }
+
+              // Réglages (position / taille)
+              private lateinit var prefs: SharedPreferences
+              private var idleW = DEF_W
+              private var idleH = DEF_H
+              private var offY = DEF_Y
+              private var offX = DEF_X
+              private val prefListener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+                  loadPrefs()
+                  applyPosition()
+              }
 
               // Lampe torche
               private lateinit var cm: CameraManager
@@ -262,25 +400,62 @@ jobs:
               private lateinit var conn: ConnectivityManager
               private var lastSsid: String? = null
 
+              // Musique
+              private var msm: MediaSessionManager? = null
+              private var sessionListener: MediaSessionManager.OnActiveSessionsChangedListener? = null
+              private var mediaControllers: List<MediaController> = emptyList()
+              private var mediaCtl: MediaController? = null
+              private var lastTrackKey: String? = null
+              private val mediaCb = object : MediaController.Callback() {
+                  override fun onPlaybackStateChanged(state: PlaybackState?) = refreshMedia()
+                  override fun onMetadataChanged(metadata: MediaMetadata?) = refreshMedia()
+              }
+
+              // Minuteur / chronomètre (appli Horloge)
+              private var clockActive = false
+              private var clockKey: String? = null
+              private var clockChrono = false
+              private var clockDown = false
+              private var clockBase = 0L
+              private var clockStatic: String? = null
+              private var clockPending: PendingIntent? = null
+              private val clockTick = object : Runnable {
+                  override fun run() {
+                      updateClockText()
+                      if (clockActive) ui.postDelayed(this, 500)
+                  }
+              }
+
               // ---------------------------------------------------------------- cycle de vie
 
               override fun onCreate() {
                   super.onCreate()
+                  instance = this
+                  prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+                  loadPrefs()
                   startInForeground()
                   wm = getSystemService(WINDOW_SERVICE) as WindowManager
                   buildIsland()
                   setupTorch()
                   setupWifi()
                   setupBluetooth()
+                  setupMedia()
+                  prefs.registerOnSharedPreferenceChangeListener(prefListener)
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
               override fun onBind(intent: Intent?): IBinder? = null
 
               override fun onDestroy() {
+                  instance = null
                   ui.removeCallbacksAndMessages(null)
+                  prefs.unregisterOnSharedPreferenceChangeListener(prefListener)
                   try { conn.unregisterNetworkCallback(netCb) } catch (e: Exception) {}
                   try { unregisterReceiver(btReceiver) } catch (e: Exception) {}
+                  try { sessionListener?.let { msm?.removeOnActiveSessionsChangedListener(it) } } catch (e: Exception) {}
+                  for (c in mediaControllers) {
+                      try { c.unregisterCallback(mediaCb) } catch (e: Exception) {}
+                  }
                   try { wm.removeView(root) } catch (e: Exception) {}
                   super.onDestroy()
               }
@@ -301,18 +476,43 @@ jobs:
                   }
               }
 
+              // ---------------------------------------------------------------- réglages
+
+              private fun loadPrefs() {
+                  idleW = prefs.getInt("w", DEF_W)
+                  idleH = prefs.getInt("h", DEF_H)
+                  offY = prefs.getInt("y", DEF_Y)
+                  offX = prefs.getInt("x", DEF_X)
+              }
+
+              private fun applyPosition() {
+                  wlp.x = dp(offX)
+                  wlp.y = dp(offY)
+                  try { wm.updateViewLayout(root, wlp) } catch (e: Exception) {}
+                  if (mode == Mode.IDLE) restPill(false)
+              }
+
               // ---------------------------------------------------------------- UI
 
               private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
               private fun dpf(v: Int) = v * resources.displayMetrics.density
 
+              private fun ctrlButton(label: String, onClick: () -> Unit) = TextView(this).apply {
+                  text = label
+                  textSize = 24f
+                  setTextColor(Color.WHITE)
+                  gravity = Gravity.CENTER
+                  setPadding(dp(24), dp(4), dp(24), dp(4))
+                  setOnClickListener { onClick(); resetCollapse() }
+              }
+
               private fun buildIsland() {
                   bg = GradientDrawable().apply {
                       setColor(Color.BLACK)
-                      cornerRadius = dpf(IDLE_H / 2)
+                      cornerRadius = dpf(idleH / 2)
                   }
 
-                  // Texte des évènements (Wi-Fi / Bluetooth)
+                  // --- évènements Wi-Fi / Bluetooth
                   eventText = TextView(this).apply {
                       setTextColor(Color.WHITE)
                       textSize = 15f
@@ -323,9 +523,9 @@ jobs:
                       visibility = View.GONE
                   }
 
-                  // Panneau lampe torche
+                  // --- lampe torche
                   val title = TextView(this).apply {
-                      text = "🔦  Lampe torche"
+                      text = "��  Lampe torche"
                       setTextColor(Color.WHITE)
                       textSize = 16f
                   }
@@ -371,13 +571,109 @@ jobs:
                       )
                   }
 
+                  // --- lecteur musical
+                  musicArt = ImageView(this).apply {
+                      scaleType = ImageView.ScaleType.CENTER_CROP
+                      setBackgroundColor(Color.rgb(44, 44, 46))
+                      clipToOutline = true
+                      outlineProvider = object : ViewOutlineProvider() {
+                          override fun getOutline(view: View, outline: Outline) {
+                              outline.setRoundRect(0, 0, view.width, view.height, dpf(12))
+                          }
+                      }
+                  }
+                  musicTitle = TextView(this).apply {
+                      setTextColor(Color.WHITE)
+                      textSize = 16f
+                      maxLines = 1
+                      ellipsize = TextUtils.TruncateAt.END
+                  }
+                  musicArtist = TextView(this).apply {
+                      setTextColor(Color.rgb(174, 174, 178))
+                      textSize = 13f
+                      maxLines = 1
+                      ellipsize = TextUtils.TruncateAt.END
+                  }
+                  val texts = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      addView(musicTitle)
+                      addView(musicArtist)
+                  }
+                  val musicTop = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      addView(musicArt, LinearLayout.LayoutParams(dp(56), dp(56)))
+                      addView(
+                          texts,
+                          LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                              .apply { marginStart = dp(12) }
+                      )
+                  }
+                  btnPlay = ctrlButton("▶") {
+                      val ctl = mediaCtl
+                      if (ctl != null) {
+                          if (ctl.playbackState?.state == PlaybackState.STATE_PLAYING) {
+                              ctl.transportControls.pause()
+                          } else {
+                              ctl.transportControls.play()
+                          }
+                      }
+                  }
+                  val controls = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER
+                      addView(ctrlButton("◀◀") { mediaCtl?.transportControls?.skipToPrevious() })
+                      addView(btnPlay)
+                      addView(ctrlButton("▶▶") { mediaCtl?.transportControls?.skipToNext() })
+                  }
+                  musicPanel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(16), dp(16), dp(16), dp(10))
+                      visibility = View.GONE
+                      addView(musicTop)
+                      addView(
+                          controls,
+                          LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          ).apply { topMargin = dp(8) }
+                      )
+                  }
+
+                  // --- minuteur / chronomètre (à gauche et à droite de la caméra)
+                  clockIcon = TextView(this).apply {
+                      text = "⏱"
+                      textSize = 14f
+                      setTextColor(Color.WHITE)
+                      gravity = Gravity.CENTER
+                      visibility = View.GONE
+                      setOnClickListener { openClock() }
+                  }
+                  clockTime = TextView(this).apply {
+                      textSize = 14f
+                      setTextColor(YELLOW)
+                      gravity = Gravity.CENTER
+                      maxLines = 1
+                      visibility = View.GONE
+                      setOnClickListener { openClock() }
+                  }
+
                   island = FrameLayout(this).apply {
                       background = bg
                       addView(eventText, FrameLayout.LayoutParams(-1, -1))
                       addView(torchPanel, FrameLayout.LayoutParams(-1, -1))
+                      addView(musicPanel, FrameLayout.LayoutParams(-1, -1))
+                      addView(
+                          clockIcon,
+                          FrameLayout.LayoutParams(dp(CLOCK_SIDE), -1, Gravity.START or Gravity.CENTER_VERTICAL)
+                      )
+                      addView(
+                          clockTime,
+                          FrameLayout.LayoutParams(dp(CLOCK_SIDE), -1, Gravity.END or Gravity.CENTER_VERTICAL)
+                      )
                   }
 
-                  // Gestes : appui maintenu = lampe torche, tap = fermer
+                  // Gestes : appui maintenu = lampe torche, tap = musique / fermer
                   val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
                       override fun onDown(e: MotionEvent) = true
                       override fun onLongPress(e: MotionEvent) {
@@ -385,7 +681,7 @@ jobs:
                           onLongPressIsland()
                       }
                       override fun onSingleTapUp(e: MotionEvent): Boolean {
-                          if (mode != Mode.IDLE) collapse()
+                          if (mode != Mode.IDLE) collapse() else showMusic(false)
                           return true
                       }
                   })
@@ -394,11 +690,11 @@ jobs:
                   root = FrameLayout(this).apply {
                       addView(
                           island,
-                          FrameLayout.LayoutParams(dp(IDLE_W), dp(IDLE_H), Gravity.CENTER_HORIZONTAL)
+                          FrameLayout.LayoutParams(dp(idleW), dp(idleH), Gravity.CENTER_HORIZONTAL)
                       )
                   }
 
-                  val params = WindowManager.LayoutParams(
+                  wlp = WindowManager.LayoutParams(
                       ViewGroup.LayoutParams.WRAP_CONTENT,
                       ViewGroup.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -409,17 +705,18 @@ jobs:
                       PixelFormat.TRANSLUCENT
                   ).apply {
                       gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-                      y = dp(TOP_MARGIN)
+                      x = dp(offX)
+                      y = dp(offY)
                       if (Build.VERSION.SDK_INT >= 28) {
                           layoutInDisplayCutoutMode =
                               WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
                       }
                   }
-                  wm.addView(root, params)
+                  wm.addView(root, wlp)
                   updateTorchUi()
               }
 
-              private fun animateTo(wDp: Int, hDp: Int, rDp: Int, expand: Boolean = true) {
+              private fun animateTo(wDp: Int, hDp: Int, rDp: Int) {
                   anim?.cancel()
                   val lp = island.layoutParams
                   val w0 = lp.width
@@ -428,9 +725,10 @@ jobs:
                   val w1 = dp(wDp)
                   val h1 = dp(hDp)
                   val r1 = dpf(rDp)
+                  val grow = w1 >= w0 && h1 >= h0
                   anim = ValueAnimator.ofFloat(0f, 1f).apply {
-                      duration = if (expand) 420 else 300
-                      interpolator = if (expand) OvershootInterpolator(0.9f) else DecelerateInterpolator()
+                      duration = if (grow) 420 else 300
+                      interpolator = if (grow) OvershootInterpolator(0.9f) else DecelerateInterpolator()
                       addUpdateListener {
                           val t = it.animatedValue as Float
                           lp.width = (w0 + (w1 - w0) * t).toInt()
@@ -442,15 +740,45 @@ jobs:
                   }
               }
 
+              private fun setSizeNow(wDp: Int, hDp: Int, rDp: Int) {
+                  anim?.cancel()
+                  val lp = island.layoutParams
+                  lp.width = dp(wDp)
+                  lp.height = dp(hDp)
+                  bg.cornerRadius = dpf(rDp)
+                  island.layoutParams = lp
+              }
+
+              /** Affiche un seul contenu dans l'île (null = aucun). */
+              private fun showOnly(v: View?) {
+                  for (c in listOf<View>(eventText, torchPanel, musicPanel)) {
+                      c.animate().cancel()
+                      c.visibility = if (c === v) View.VISIBLE else View.GONE
+                  }
+                  clockIcon.visibility = View.GONE
+                  clockTime.visibility = View.GONE
+                  if (v != null) {
+                      v.alpha = 0f
+                      v.animate().alpha(1f).setStartDelay(150).setDuration(200).start()
+                  }
+              }
+
+              /** État de repos : pilule seule, ou pilule élargie avec le minuteur. */
+              private fun restPill(animate: Boolean) {
+                  val timer = clockActive
+                  val vis = if (timer) View.VISIBLE else View.GONE
+                  clockIcon.visibility = vis
+                  clockTime.visibility = vis
+                  val w = if (timer) idleW + 2 * CLOCK_SIDE else idleW
+                  if (animate) animateTo(w, idleH, idleH / 2) else setSizeNow(w, idleH, idleH / 2)
+              }
+
               private fun showEvent(text: String) {
                   if (mode == Mode.TORCH) return // on ne dérange pas le contrôle de la lampe
                   ui.removeCallbacks(collapseRunnable)
                   mode = Mode.EVENT
-                  torchPanel.visibility = View.GONE
                   eventText.text = text
-                  eventText.alpha = 0f
-                  eventText.visibility = View.VISIBLE
-                  eventText.animate().alpha(1f).setStartDelay(150).setDuration(200).start()
+                  showOnly(eventText)
                   val wDp = (eventText.paint.measureText(text) / resources.displayMetrics.density).toInt() + 56
                   animateTo(wDp.coerceIn(160, 340), 48, 24)
                   ui.postDelayed(collapseRunnable, 3500)
@@ -459,26 +787,29 @@ jobs:
               private fun showTorchPanel() {
                   ui.removeCallbacks(collapseRunnable)
                   mode = Mode.TORCH
-                  eventText.visibility = View.GONE
-                  torchPanel.alpha = 0f
-                  torchPanel.visibility = View.VISIBLE
-                  torchPanel.animate().alpha(1f).setStartDelay(150).setDuration(200).start()
+                  showOnly(torchPanel)
                   animateTo(320, if (maxLevel > 1) 120 else 80, 32)
                   ui.postDelayed(collapseRunnable, 6000)
+              }
+
+              private fun showMusic(auto: Boolean) {
+                  if (mode == Mode.TORCH || mediaCtl == null) return
+                  ui.removeCallbacks(collapseRunnable)
+                  mode = Mode.MUSIC
+                  showOnly(musicPanel)
+                  animateTo(330, 140, 34)
+                  ui.postDelayed(collapseRunnable, if (auto) 4500 else 7000)
               }
 
               private fun collapse() {
                   ui.removeCallbacks(collapseRunnable)
                   mode = Mode.IDLE
-                  eventText.animate().cancel()
-                  torchPanel.animate().cancel()
-                  eventText.visibility = View.GONE
-                  torchPanel.visibility = View.GONE
-                  animateTo(IDLE_W, IDLE_H, IDLE_H / 2, expand = false)
+                  showOnly(null)
+                  restPill(true)
               }
 
               private fun resetCollapse() {
-                  if (mode != Mode.TORCH) return
+                  if (mode != Mode.TORCH && mode != Mode.MUSIC) return
                   ui.removeCallbacks(collapseRunnable)
                   ui.postDelayed(collapseRunnable, 6000)
               }
@@ -578,7 +909,7 @@ jobs:
                   val ssid = raw?.trim('"') ?: return
                   if (ssid.isEmpty() || ssid == "<unknown ssid>" || ssid == lastSsid) return
                   lastSsid = ssid
-                  ui.post { showEvent("📶  $ssid") }
+                  ui.post { showEvent("��  $ssid") }
               }
 
               // ---------------------------------------------------------------- Bluetooth
@@ -593,8 +924,8 @@ jobs:
                       }
                       val name = try { dev?.name } catch (e: SecurityException) { null } ?: "Appareil Bluetooth"
                       when (i.action) {
-                          BluetoothDevice.ACTION_ACL_CONNECTED -> showEvent("🎧  $name")
-                          BluetoothDevice.ACTION_ACL_DISCONNECTED -> showEvent("🔌  $name déconnecté")
+                          BluetoothDevice.ACTION_ACL_CONNECTED -> showEvent("��  $name")
+                          BluetoothDevice.ACTION_ACL_DISCONNECTED -> showEvent("��  $name déconnecté")
                       }
                   }
               }
@@ -609,6 +940,179 @@ jobs:
                   } else {
                       registerReceiver(btReceiver, filter)
                   }
+              }
+
+              // ---------------------------------------------------------------- musique
+
+              /** Appelé aussi par NotifListener dès que l'accès aux notifications est actif. */
+              fun onListenerReady() {
+                  ui.post { setupMedia() }
+              }
+
+              private fun setupMedia() {
+                  try {
+                      val m = getSystemService(MediaSessionManager::class.java)
+                      msm = m
+                      val cn = ComponentName(this, NotifListener::class.java)
+                      sessionListener?.let { m.removeOnActiveSessionsChangedListener(it) }
+                      val l = MediaSessionManager.OnActiveSessionsChangedListener { list -> onSessions(list) }
+                      sessionListener = l
+                      m.addOnActiveSessionsChangedListener(l, cn, ui)
+                      onSessions(m.getActiveSessions(cn))
+                  } catch (e: SecurityException) {
+                      // accès aux notifications pas encore accordé
+                  }
+              }
+
+              private fun onSessions(list: List<MediaController>?) {
+                  for (c in mediaControllers) {
+                      try { c.unregisterCallback(mediaCb) } catch (e: Exception) {}
+                  }
+                  mediaControllers = list ?: emptyList()
+                  for (c in mediaControllers) c.registerCallback(mediaCb, ui)
+                  refreshMedia()
+              }
+
+              private fun refreshMedia() {
+                  val pick = mediaControllers.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+                      ?: mediaControllers.firstOrNull()
+                  mediaCtl = pick
+                  if (pick == null) {
+                      lastTrackKey = null
+                      if (mode == Mode.MUSIC) collapse()
+                      return
+                  }
+                  val md = pick.metadata
+                  val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE) ?: "Lecture en cours"
+                  val artist = md?.getString(MediaMetadata.METADATA_KEY_ARTIST)
+                      ?: md?.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
+                  val art = md?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                      ?: md?.getBitmap(MediaMetadata.METADATA_KEY_ART)
+                      ?: md?.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+                  musicTitle.text = title
+                  musicArtist.text = artist
+                  if (art != null) musicArt.setImageBitmap(art) else musicArt.setImageDrawable(null)
+
+                  val playing = pick.playbackState?.state == PlaybackState.STATE_PLAYING
+                  btnPlay.text = if (playing) "❚❚" else "▶"
+                  if (playing) {
+                      val key = "$title|$artist"
+                      val changed = key != lastTrackKey
+                      lastTrackKey = key
+                      if (changed && (mode == Mode.IDLE || mode == Mode.EVENT)) showMusic(true)
+                  }
+              }
+
+              // ---------------------------------------------------------------- minuteur / chronomètre
+
+              fun postClock(sbn: StatusBarNotification) {
+                  ui.post { onClockPosted(sbn) }
+              }
+
+              fun postClockRemoved(sbn: StatusBarNotification) {
+                  ui.post { onClockRemoved(sbn) }
+              }
+
+              private fun onClockPosted(sbn: StatusBarNotification) {
+                  val n = sbn.notification
+                  val ex = n.extras
+                  val chrono = ex.getBoolean("android.showChronometer", false)
+                  if (!chrono && !sbn.isOngoing) return
+
+                  val txt = listOf(
+                      Notification.EXTRA_TITLE, Notification.EXTRA_TEXT,
+                      Notification.EXTRA_SUB_TEXT, Notification.EXTRA_BIG_TEXT
+                  ).joinToString(" ") { ex.getCharSequence(it)?.toString() ?: "" }
+                  val found = TIME_RE.find(txt)?.value
+                  val useChrono = chrono && n.`when` > 0
+                  if (!useChrono && found == null) return
+
+                  clockKey = sbn.key
+                  clockPending = n.contentIntent
+                  clockChrono = useChrono
+                  clockDown = ex.getBoolean("android.chronometerCountDown", false)
+                  clockBase = n.`when`
+                  clockStatic = found
+                  clockIcon.text = if (useChrono && clockDown) "⏳" else "⏱"
+                  updateClockText()
+
+                  if (!clockActive) {
+                      clockActive = true
+                      ui.removeCallbacks(clockTick)
+                      ui.post(clockTick)
+                      if (mode == Mode.IDLE) restPill(true)
+                  }
+              }
+
+              private fun onClockRemoved(sbn: StatusBarNotification) {
+                  if (!clockActive || sbn.key != clockKey) return
+                  val finished = clockChrono && clockDown && clockBase - System.currentTimeMillis() < 4000
+                  clockActive = false
+                  clockKey = null
+                  ui.removeCallbacks(clockTick)
+                  if (finished) {
+                      showEvent("⏰  Minuteur terminé")
+                  } else if (mode == Mode.IDLE) {
+                      restPill(true)
+                  }
+              }
+
+              private fun updateClockText() {
+                  clockTime.text = if (clockChrono) {
+                      val now = System.currentTimeMillis()
+                      val ms = if (clockDown) clockBase - now else now - clockBase
+                      fmt((ms.coerceAtLeast(0L)) / 1000)
+                  } else {
+                      clockStatic ?: "--:--"
+                  }
+              }
+
+              private fun fmt(totalSec: Long): String {
+                  val h = totalSec / 3600
+                  val m = (totalSec % 3600) / 60
+                  val s = totalSec % 60
+                  return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%02d:%02d".format(m, s)
+              }
+
+              private fun openClock() {
+                  try { clockPending?.send() } catch (e: PendingIntent.CanceledException) {}
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/java/com/example/dynamicisland/NotifListener.kt << 'EOF_FILE'
+          package com.example.dynamicisland
+
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+
+          /**
+           * Sert à deux choses :
+           *  - donner à Android l'autorisation de lire les sessions média (lecteur musical)
+           *  - repérer les notifications de l'appli Horloge (minuteur / chronomètre)
+           */
+          class NotifListener : NotificationListenerService() {
+
+              private val clockPackages = setOf(
+                  "com.sec.android.app.clockpackage", // Horloge Samsung
+                  "com.google.android.deskclock"      // Horloge Google
+              )
+
+              override fun onListenerConnected() {
+                  IslandService.instance?.onListenerReady()
+                  try {
+                      activeNotifications?.forEach { handle(it, true) }
+                  } catch (e: Exception) {
+                  }
+              }
+
+              override fun onNotificationPosted(sbn: StatusBarNotification) = handle(sbn, true)
+
+              override fun onNotificationRemoved(sbn: StatusBarNotification) = handle(sbn, false)
+
+              private fun handle(sbn: StatusBarNotification, posted: Boolean) {
+                  if (sbn.packageName !in clockPackages) return
+                  val island = IslandService.instance ?: return
+                  if (posted) island.postClock(sbn) else island.postClockRemoved(sbn)
               }
           }
           EOF_FILE
