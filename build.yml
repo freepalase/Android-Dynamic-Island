@@ -1,0 +1,629 @@
+name: Build APK
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Creer le projet Android
+        run: |
+          mkdir -p app/src/main/java/com/example/dynamicisland
+          cat > settings.gradle.kts << 'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "DynamicIsland"
+          include(":app")
+          EOF_FILE
+          cat > build.gradle.kts << 'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF_FILE
+          cat > gradle.properties << 'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.nonTransitiveRClass=true
+          EOF_FILE
+          cat > app/build.gradle.kts << 'EOF_FILE'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.dynamicisland"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.example.dynamicisland"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/AndroidManifest.xml << 'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+              <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+              <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <uses-permission
+                  android:name="android.permission.BLUETOOTH"
+                  android:maxSdkVersion="30" />
+
+              <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
+
+              <application
+                  android:label="Dynamic Island"
+                  android:theme="@android:style/Theme.DeviceDefault.Light">
+
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".IslandService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="overlay" />
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          cat > app/src/main/java/com/example/dynamicisland/MainActivity.kt << 'EOF_FILE'
+          package com.example.dynamicisland
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.pm.PackageManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+
+          class MainActivity : Activity() {
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val pad = (24 * resources.displayMetrics.density).toInt()
+                  setContentView(LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setPadding(pad, pad, pad, pad)
+                      addView(TextView(context).apply {
+                          text = "Dynamic Island"
+                          textSize = 24f
+                          gravity = Gravity.CENTER
+                      })
+                      addView(Button(context).apply {
+                          text = "Activer"
+                          setOnClickListener { start() }
+                      })
+                      addView(Button(context).apply {
+                          text = "Désactiver"
+                          setOnClickListener { stopService(Intent(context, IslandService::class.java)) }
+                      })
+                  })
+              }
+
+              private fun start() {
+                  // 1) Affichage par-dessus les autres applications
+                  if (!Settings.canDrawOverlays(this)) {
+                      startActivity(
+                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                      )
+                      return
+                  }
+                  // 2) Permissions runtime (nom du Wi-Fi, nom Bluetooth, notification du service)
+                  val wanted = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
+                  if (Build.VERSION.SDK_INT >= 31) wanted += Manifest.permission.BLUETOOTH_CONNECT
+                  if (Build.VERSION.SDK_INT >= 33) wanted += Manifest.permission.POST_NOTIFICATIONS
+                  val missing = wanted.filter { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }
+                  if (missing.isNotEmpty()) {
+                      requestPermissions(missing.toTypedArray(), 1)
+                      return
+                  }
+                  launchService()
+              }
+
+              override fun onRequestPermissionsResult(code: Int, perms: Array<out String>, res: IntArray) {
+                  super.onRequestPermissionsResult(code, perms, res)
+                  launchService() // démarre même si une permission est refusée (fonctions partielles)
+              }
+
+              private fun launchService() {
+                  startForegroundService(Intent(this, IslandService::class.java))
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/java/com/example/dynamicisland/IslandService.kt << 'EOF_FILE'
+          package com.example.dynamicisland
+
+          import android.animation.ValueAnimator
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.bluetooth.BluetoothDevice
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.ServiceInfo
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.graphics.drawable.GradientDrawable
+          import android.hardware.camera2.CameraCharacteristics
+          import android.hardware.camera2.CameraManager
+          import android.net.ConnectivityManager
+          import android.net.Network
+          import android.net.NetworkCapabilities
+          import android.net.NetworkRequest
+          import android.net.wifi.WifiInfo
+          import android.net.wifi.WifiManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.GestureDetector
+          import android.view.HapticFeedbackConstants
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.WindowManager
+          import android.view.animation.DecelerateInterpolator
+          import android.view.animation.OvershootInterpolator
+          import android.widget.FrameLayout
+          import android.widget.LinearLayout
+          import android.widget.SeekBar
+          import android.widget.TextView
+
+          class IslandService : Service() {
+
+              companion object {
+                  // Taille de la pilule au repos (dp) : à ajuster pour coller à ta caméra frontale
+                  const val IDLE_W = 126
+                  const val IDLE_H = 36
+                  const val TOP_MARGIN = 10 // distance depuis le haut de l'écran (dp)
+                  private val YELLOW = Color.rgb(255, 214, 10)
+              }
+
+              private enum class Mode { IDLE, EVENT, TORCH }
+
+              private val ui = Handler(Looper.getMainLooper())
+              private lateinit var wm: WindowManager
+              private lateinit var root: FrameLayout
+              private lateinit var island: FrameLayout
+              private lateinit var bg: GradientDrawable
+              private lateinit var eventText: TextView
+              private lateinit var torchPanel: LinearLayout
+              private lateinit var torchBtn: TextView
+              private lateinit var seek: SeekBar
+
+              private var mode = Mode.IDLE
+              private var anim: ValueAnimator? = null
+              private val collapseRunnable = Runnable { collapse() }
+
+              // Lampe torche
+              private lateinit var cm: CameraManager
+              private var camId: String? = null
+              private var torchOn = false
+              private var maxLevel = 1
+              private var level = 1
+
+              // Réseau
+              private lateinit var conn: ConnectivityManager
+              private var lastSsid: String? = null
+
+              // ---------------------------------------------------------------- cycle de vie
+
+              override fun onCreate() {
+                  super.onCreate()
+                  startInForeground()
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  buildIsland()
+                  setupTorch()
+                  setupWifi()
+                  setupBluetooth()
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int) = START_STICKY
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onDestroy() {
+                  ui.removeCallbacksAndMessages(null)
+                  try { conn.unregisterNetworkCallback(netCb) } catch (e: Exception) {}
+                  try { unregisterReceiver(btReceiver) } catch (e: Exception) {}
+                  try { wm.removeView(root) } catch (e: Exception) {}
+                  super.onDestroy()
+              }
+
+              private fun startInForeground() {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(
+                      NotificationChannel("island", "Dynamic Island", NotificationManager.IMPORTANCE_MIN)
+                  )
+                  val n = Notification.Builder(this, "island")
+                      .setSmallIcon(android.R.drawable.ic_menu_info_details)
+                      .setContentTitle("Dynamic Island active")
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  } else {
+                      startForeground(1, n)
+                  }
+              }
+
+              // ---------------------------------------------------------------- UI
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun dpf(v: Int) = v * resources.displayMetrics.density
+
+              private fun buildIsland() {
+                  bg = GradientDrawable().apply {
+                      setColor(Color.BLACK)
+                      cornerRadius = dpf(IDLE_H / 2)
+                  }
+
+                  // Texte des évènements (Wi-Fi / Bluetooth)
+                  eventText = TextView(this).apply {
+                      setTextColor(Color.WHITE)
+                      textSize = 15f
+                      maxLines = 1
+                      ellipsize = TextUtils.TruncateAt.END
+                      gravity = Gravity.CENTER
+                      setPadding(dp(16), 0, dp(16), 0)
+                      visibility = View.GONE
+                  }
+
+                  // Panneau lampe torche
+                  val title = TextView(this).apply {
+                      text = "🔦  Lampe torche"
+                      setTextColor(Color.WHITE)
+                      textSize = 16f
+                  }
+                  torchBtn = TextView(this).apply {
+                      textSize = 14f
+                      gravity = Gravity.CENTER
+                      setPadding(dp(18), dp(8), dp(18), dp(8))
+                      background = GradientDrawable().apply { cornerRadius = dpf(100) }
+                      setOnClickListener { setTorch(!torchOn); resetCollapse() }
+                  }
+                  val header = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      addView(title, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                      addView(torchBtn)
+                  }
+                  seek = SeekBar(this).apply {
+                      progressTintList = ColorStateList.valueOf(YELLOW)
+                      thumbTintList = ColorStateList.valueOf(YELLOW)
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar, p: Int, fromUser: Boolean) {
+                              if (!fromUser) return
+                              level = p + 1
+                              if (torchOn) setTorch(true)
+                              resetCollapse()
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar) { resetCollapse() }
+                          override fun onStopTrackingTouch(s: SeekBar) { resetCollapse() }
+                      })
+                  }
+                  torchPanel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(20), dp(16), dp(20), dp(16))
+                      visibility = View.GONE
+                      addView(header)
+                      addView(
+                          seek,
+                          LinearLayout.LayoutParams(
+                              ViewGroup.LayoutParams.MATCH_PARENT,
+                              ViewGroup.LayoutParams.WRAP_CONTENT
+                          ).apply { topMargin = dp(12) }
+                      )
+                  }
+
+                  island = FrameLayout(this).apply {
+                      background = bg
+                      addView(eventText, FrameLayout.LayoutParams(-1, -1))
+                      addView(torchPanel, FrameLayout.LayoutParams(-1, -1))
+                  }
+
+                  // Gestes : appui maintenu = lampe torche, tap = fermer
+                  val gd = GestureDetector(this, object : GestureDetector.SimpleOnGestureListener() {
+                      override fun onDown(e: MotionEvent) = true
+                      override fun onLongPress(e: MotionEvent) {
+                          island.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                          onLongPressIsland()
+                      }
+                      override fun onSingleTapUp(e: MotionEvent): Boolean {
+                          if (mode != Mode.IDLE) collapse()
+                          return true
+                      }
+                  })
+                  island.setOnTouchListener { _, e -> gd.onTouchEvent(e) }
+
+                  root = FrameLayout(this).apply {
+                      addView(
+                          island,
+                          FrameLayout.LayoutParams(dp(IDLE_W), dp(IDLE_H), Gravity.CENTER_HORIZONTAL)
+                      )
+                  }
+
+                  val params = WindowManager.LayoutParams(
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      ViewGroup.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                          WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                          WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                      y = dp(TOP_MARGIN)
+                      if (Build.VERSION.SDK_INT >= 28) {
+                          layoutInDisplayCutoutMode =
+                              WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                      }
+                  }
+                  wm.addView(root, params)
+                  updateTorchUi()
+              }
+
+              private fun animateTo(wDp: Int, hDp: Int, rDp: Int, expand: Boolean = true) {
+                  anim?.cancel()
+                  val lp = island.layoutParams
+                  val w0 = lp.width
+                  val h0 = lp.height
+                  val r0 = bg.cornerRadius
+                  val w1 = dp(wDp)
+                  val h1 = dp(hDp)
+                  val r1 = dpf(rDp)
+                  anim = ValueAnimator.ofFloat(0f, 1f).apply {
+                      duration = if (expand) 420 else 300
+                      interpolator = if (expand) OvershootInterpolator(0.9f) else DecelerateInterpolator()
+                      addUpdateListener {
+                          val t = it.animatedValue as Float
+                          lp.width = (w0 + (w1 - w0) * t).toInt()
+                          lp.height = (h0 + (h1 - h0) * t).toInt()
+                          bg.cornerRadius = r0 + (r1 - r0) * t
+                          island.layoutParams = lp
+                      }
+                      start()
+                  }
+              }
+
+              private fun showEvent(text: String) {
+                  if (mode == Mode.TORCH) return // on ne dérange pas le contrôle de la lampe
+                  ui.removeCallbacks(collapseRunnable)
+                  mode = Mode.EVENT
+                  torchPanel.visibility = View.GONE
+                  eventText.text = text
+                  eventText.alpha = 0f
+                  eventText.visibility = View.VISIBLE
+                  eventText.animate().alpha(1f).setStartDelay(150).setDuration(200).start()
+                  val wDp = (eventText.paint.measureText(text) / resources.displayMetrics.density).toInt() + 56
+                  animateTo(wDp.coerceIn(160, 340), 48, 24)
+                  ui.postDelayed(collapseRunnable, 3500)
+              }
+
+              private fun showTorchPanel() {
+                  ui.removeCallbacks(collapseRunnable)
+                  mode = Mode.TORCH
+                  eventText.visibility = View.GONE
+                  torchPanel.alpha = 0f
+                  torchPanel.visibility = View.VISIBLE
+                  torchPanel.animate().alpha(1f).setStartDelay(150).setDuration(200).start()
+                  animateTo(320, if (maxLevel > 1) 120 else 80, 32)
+                  ui.postDelayed(collapseRunnable, 6000)
+              }
+
+              private fun collapse() {
+                  ui.removeCallbacks(collapseRunnable)
+                  mode = Mode.IDLE
+                  eventText.animate().cancel()
+                  torchPanel.animate().cancel()
+                  eventText.visibility = View.GONE
+                  torchPanel.visibility = View.GONE
+                  animateTo(IDLE_W, IDLE_H, IDLE_H / 2, expand = false)
+              }
+
+              private fun resetCollapse() {
+                  if (mode != Mode.TORCH) return
+                  ui.removeCallbacks(collapseRunnable)
+                  ui.postDelayed(collapseRunnable, 6000)
+              }
+
+              private fun onLongPressIsland() {
+                  if (mode == Mode.TORCH) return
+                  if (camId == null) {
+                      showEvent("Pas de lampe torche")
+                      return
+                  }
+                  if (!torchOn) setTorch(true)
+                  showTorchPanel()
+              }
+
+              // ---------------------------------------------------------------- lampe torche
+
+              private fun setupTorch() {
+                  cm = getSystemService(CameraManager::class.java)
+                  for (id in cm.cameraIdList) {
+                      val ch = cm.getCameraCharacteristics(id)
+                      val hasFlash = ch.get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                      val back = ch.get(CameraCharacteristics.LENS_FACING) == CameraCharacteristics.LENS_FACING_BACK
+                      if (hasFlash && back) {
+                          camId = id
+                          if (Build.VERSION.SDK_INT >= 33) {
+                              maxLevel = ch.get(CameraCharacteristics.FLASH_INFO_STRENGTH_MAXIMUM_LEVEL) ?: 1
+                              level = ch.get(CameraCharacteristics.FLASH_INFO_STRENGTH_DEFAULT_LEVEL) ?: 1
+                          }
+                          break
+                      }
+                  }
+                  // Réglage d'intensité uniquement si le téléphone le supporte (Android 13+)
+                  seek.visibility = if (maxLevel > 1) View.VISIBLE else View.GONE
+                  seek.max = (maxLevel - 1).coerceAtLeast(1)
+                  seek.progress = level - 1
+
+                  cm.registerTorchCallback(object : CameraManager.TorchCallback() {
+                      override fun onTorchModeChanged(id: String, enabled: Boolean) {
+                          if (id != camId) return
+                          torchOn = enabled
+                          updateTorchUi()
+                      }
+                  }, ui)
+              }
+
+              private fun setTorch(on: Boolean) {
+                  val id = camId ?: return
+                  try {
+                      if (on && Build.VERSION.SDK_INT >= 33 && maxLevel > 1) {
+                          cm.turnOnTorchWithStrengthLevel(id, level)
+                      } else {
+                          cm.setTorchMode(id, on)
+                      }
+                  } catch (e: Exception) {
+                      // caméra utilisée par une autre app, etc.
+                  }
+              }
+
+              private fun updateTorchUi() {
+                  (torchBtn.background as GradientDrawable)
+                      .setColor(if (torchOn) YELLOW else Color.rgb(58, 58, 60))
+                  torchBtn.setTextColor(if (torchOn) Color.BLACK else Color.WHITE)
+                  torchBtn.text = if (torchOn) "ON" else "OFF"
+              }
+
+              // ---------------------------------------------------------------- Wi-Fi
+
+              private val netCb: ConnectivityManager.NetworkCallback by lazy {
+                  if (Build.VERSION.SDK_INT >= 31) {
+                      object : ConnectivityManager.NetworkCallback(ConnectivityManager.NetworkCallback.FLAG_INCLUDE_LOCATION_INFO) {
+                          override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) = onWifi(c)
+                          override fun onLost(n: Network) { lastSsid = null }
+                      }
+                  } else {
+                      object : ConnectivityManager.NetworkCallback() {
+                          override fun onCapabilitiesChanged(n: Network, c: NetworkCapabilities) = onWifi(c)
+                          override fun onLost(n: Network) { lastSsid = null }
+                      }
+                  }
+              }
+
+              private fun setupWifi() {
+                  conn = getSystemService(ConnectivityManager::class.java)
+                  val req = NetworkRequest.Builder()
+                      .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+                      .build()
+                  conn.registerNetworkCallback(req, netCb)
+              }
+
+              @Suppress("DEPRECATION")
+              private fun onWifi(c: NetworkCapabilities) {
+                  val raw = if (Build.VERSION.SDK_INT >= 31) {
+                      (c.transportInfo as? WifiInfo)?.ssid
+                  } else {
+                      (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager).connectionInfo?.ssid
+                  }
+                  val ssid = raw?.trim('"') ?: return
+                  if (ssid.isEmpty() || ssid == "<unknown ssid>" || ssid == lastSsid) return
+                  lastSsid = ssid
+                  ui.post { showEvent("📶  $ssid") }
+              }
+
+              // ---------------------------------------------------------------- Bluetooth
+
+              private val btReceiver = object : BroadcastReceiver() {
+                  @Suppress("DEPRECATION")
+                  override fun onReceive(c: Context, i: Intent) {
+                      val dev = if (Build.VERSION.SDK_INT >= 33) {
+                          i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice::class.java)
+                      } else {
+                          i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE)
+                      }
+                      val name = try { dev?.name } catch (e: SecurityException) { null } ?: "Appareil Bluetooth"
+                      when (i.action) {
+                          BluetoothDevice.ACTION_ACL_CONNECTED -> showEvent("🎧  $name")
+                          BluetoothDevice.ACTION_ACL_DISCONNECTED -> showEvent("🔌  $name déconnecté")
+                      }
+                  }
+              }
+
+              private fun setupBluetooth() {
+                  val filter = IntentFilter().apply {
+                      addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+                      addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+                  }
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      registerReceiver(btReceiver, filter, Context.RECEIVER_EXPORTED)
+                  } else {
+                      registerReceiver(btReceiver, filter)
+                  }
+              }
+          }
+          EOF_FILE
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+      - name: Compiler
+        run: gradle assembleDebug --no-daemon
+      - name: Publier l'APK (Releases)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Dynamic Island build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
